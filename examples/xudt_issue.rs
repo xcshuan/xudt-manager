@@ -61,10 +61,18 @@ fn main() -> Result<(), Box<dyn StdErr>> {
 
     let mut cell_collector = DefaultCellCollector::new(&network_info.url);
 
+    let xudt_token_info_cell_capacity = calculate_xudt_token_info_cell_capacity(issue_lock_script.clone()) as u64 * NANOS_PER_SEC;
+    let xudt_cell_capacity = calculate_udt_cell_capacity(issue_lock_script.clone()) as u64 * NANOS_PER_SEC;
+
+    println!("xudt_token_info_cell_capacity {}", xudt_token_info_cell_capacity);
+    println!("xudt_cell_capacity {}", xudt_cell_capacity);
+
+
     let ckb_query = {
         let mut query = CellQueryOptions::new_lock(issue_lock_script.clone());
         query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
         query.data_len_range = Some(ValueRangeOption::new_exact(0));
+        query.min_total_capacity = xudt_cell_capacity + xudt_token_info_cell_capacity + 1000;
         query
     };
 
@@ -92,13 +100,15 @@ fn main() -> Result<(), Box<dyn StdErr>> {
         vec![],
     );
 
-    builder.add_input(
-        TransactionInput {
-            live_cell: ckb_cells[0].clone(),
-            since: 0,
-        },
-        0,
-    );
+    for cell in ckb_cells {
+        builder.add_input(
+            TransactionInput {
+                live_cell: cell,
+                since: 0,
+            },
+            0,
+        )
+    };
 
     let xudt_type = Script::new_builder()
         .code_hash(
@@ -114,8 +124,7 @@ fn main() -> Result<(), Box<dyn StdErr>> {
             .lock(issue_lock_script.clone())
             .type_(Some(xudt_type).pack())
             .capacity(
-                (calculate_udt_cell_capacity(issue_lock_script.clone()) as u64 * NANOS_PER_SEC)
-                    .pack(),
+                xudt_cell_capacity.pack(),
             )
             .build(),
         issue_amount.to_le_bytes().pack(),
@@ -126,9 +135,7 @@ fn main() -> Result<(), Box<dyn StdErr>> {
             .lock(issue_lock_script.clone())
             .type_(Some(unique_type_script).pack())
             .capacity(
-                (calculate_xudt_token_info_cell_capacity(issue_lock_script.clone()) as u64
-                    * NANOS_PER_SEC)
-                    .pack(),
+                xudt_token_info_cell_capacity.pack(),
             )
             .build(),
         encode_token_info().pack(),
@@ -217,18 +224,12 @@ fn calculate_xudt_token_info_cell_capacity(lock: Script) -> usize {
 }
 
 fn encode_token_info() -> Vec<u8> {
-    let decimal = hex::encode(&vec![ISSUE_DECIMAL]);
-    let name = hex::encode(ISSUE_NAME);
-    let name_size = hex::encode(&vec![(name.len() / 2) as u8]);
-    let symbol = hex::encode(ISSUE_SYMBOL);
-    let symbol_size = hex::encode(&vec![(symbol.len() / 2) as u8]);
-
     [
-        decimal.as_bytes(),
-        name_size.as_bytes(),
-        name.as_bytes(),
-        symbol_size.as_bytes(),
-        symbol.as_bytes(),
+        &[ISSUE_DECIMAL],
+        &[ISSUE_NAME.len() as u8],
+        ISSUE_NAME.as_bytes(),
+        &[ISSUE_SYMBOL.len() as u8],
+        ISSUE_SYMBOL.as_bytes(),
     ]
     .concat()
 }
