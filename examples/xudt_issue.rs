@@ -217,18 +217,12 @@ fn calculate_xudt_token_info_cell_capacity(lock: Script) -> usize {
 }
 
 fn encode_token_info() -> Vec<u8> {
-    let decimal = hex::encode(&vec![ISSUE_DECIMAL]);
-    let name = hex::encode(ISSUE_NAME);
-    let name_size = hex::encode(&vec![(name.len() / 2) as u8]);
-    let symbol = hex::encode(ISSUE_SYMBOL);
-    let symbol_size = hex::encode(&vec![(symbol.len() / 2) as u8]);
-
     [
-        decimal.as_bytes(),
-        name_size.as_bytes(),
-        name.as_bytes(),
-        symbol_size.as_bytes(),
-        symbol.as_bytes(),
+        &[ISSUE_DECIMAL],
+        &[ISSUE_NAME.len() as u8],
+        ISSUE_NAME.as_bytes(),
+        &[ISSUE_SYMBOL.len() as u8],
+        ISSUE_SYMBOL.as_bytes(),
     ]
     .concat()
 }
