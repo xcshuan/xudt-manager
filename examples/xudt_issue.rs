@@ -1,15 +1,18 @@
 use ckb_hash::{blake2b_256, new_blake2b};
+use ckb_sdk::transaction::input::TransactionInput;
 use ckb_sdk::{
     constants::SIGHASH_TYPE_HASH,
     traits::{CellCollector, CellQueryOptions, DefaultCellCollector, ValueRangeOption},
     transaction::{
         builder::CkbTransactionBuilder,
-        input::TransactionInput,
         signer::{SignContexts, TransactionSigner},
         TransactionBuilderConfiguration,
     },
     {Address, AddressPayload, CkbRpcClient, NetworkInfo, SECP256K1},
 };
+use ckb_types::core::Capacity;
+use ckb_types::packed::Uint64;
+use ckb_types::prelude::Unpack;
 use ckb_types::{
     bytes::Bytes,
     core::{DepType, ScriptHashType},
@@ -25,10 +28,9 @@ use xudt_manager::{handler::XudtHandler, XudtTransactionBuilder};
 
 const UNIQUE_ARGS_SIZE: usize = 20;
 const ISSUE_DECIMAL: u8 = 8;
-const ISSUE_NAME: &'static str = "XUDT Test Token";
-const ISSUE_SYMBOL: &'static str = "XTT";
+const ISSUE_NAME: &'static str = "XUDT Test C Token";
+const ISSUE_SYMBOL: &'static str = "XTCT";
 const ISSUE_AMOUNT: u128 = 2100_000;
-const NANOS_PER_SEC: u64 = 1_000_000_000;
 
 fn main() -> Result<(), Box<dyn StdErr>> {
     let network_info = NetworkInfo::testnet();
@@ -61,54 +63,12 @@ fn main() -> Result<(), Box<dyn StdErr>> {
 
     let mut cell_collector = DefaultCellCollector::new(&network_info.url);
 
-    let xudt_token_info_cell_capacity = calculate_xudt_token_info_cell_capacity(issue_lock_script.clone()) as u64 * NANOS_PER_SEC;
-    let xudt_cell_capacity = calculate_udt_cell_capacity(issue_lock_script.clone()) as u64 * NANOS_PER_SEC;
-
-    println!("xudt_token_info_cell_capacity {}", xudt_token_info_cell_capacity);
-    println!("xudt_cell_capacity {}", xudt_cell_capacity);
-
-
-    let ckb_query = {
-        let mut query = CellQueryOptions::new_lock(issue_lock_script.clone());
-        query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
-        query.data_len_range = Some(ValueRangeOption::new_exact(0));
-        query.min_total_capacity = xudt_cell_capacity + xudt_token_info_cell_capacity + 1000;
-        query
-    };
-
-    let mut ckb_cells = cell_collector.collect_live_cells(&ckb_query, true)?.0;
-    ckb_cells.retain(|cell| cell.output.type_().is_none());
-    assert!(!ckb_cells.is_empty());
-
-    let unique_type_script = Script::new_builder()
-        .code_hash(
-            h256!("0x8e341bcfec6393dcd41e635733ff2dca00a6af546949f70c57a706c0f344df8b").pack(),
-        )
-        .hash_type(ScriptHashType::Type.into())
-        .args(generate_unique_type_args(
-            CellInput::new_builder()
-                .previous_output(ckb_cells[0].clone().out_point)
-                .build(),
-            1,
-        ))
-        .build();
-
     let mut builder = XudtTransactionBuilder::new(
         issue_lock_script.clone(),
         issue_lock_script.clone(),
         configuration,
         vec![],
     );
-
-    for cell in ckb_cells {
-        builder.add_input(
-            TransactionInput {
-                live_cell: cell,
-                since: 0,
-            },
-            0,
-        )
-    };
 
     let xudt_type = Script::new_builder()
         .code_hash(
@@ -118,35 +78,70 @@ fn main() -> Result<(), Box<dyn StdErr>> {
         .args(Bytes::from(issue_lock_script.calc_script_hash().as_bytes()).pack())
         .build();
 
+    let xudt_out_cell = CellOutput::new_builder()
+        .lock(issue_lock_script.clone())
+        .type_(Some(xudt_type).pack())
+        .build_exact_capacity(Capacity::bytes(16).unwrap())?;
+
+    let unique_type_script_without_args = Script::new_builder()
+        .code_hash(
+            h256!("0x8e341bcfec6393dcd41e635733ff2dca00a6af546949f70c57a706c0f344df8b").pack(),
+        )
+        .hash_type(ScriptHashType::Type.into())
+        .build();
+
+    let dump_unique_out_cell = CellOutput::new_builder()
+        .lock(issue_lock_script.clone())
+        .type_(Some(unique_type_script_without_args.clone()).pack())
+        .build_exact_capacity(Capacity::bytes(encode_token_info().len()).unwrap())?;
+
+    let ckb_query = {
+        let mut query = CellQueryOptions::new_lock(issue_lock_script.clone());
+        query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
+        query.data_len_range = Some(ValueRangeOption::new_exact(0));
+        query.min_total_capacity = <Uint64 as Unpack<u64>>::unpack(&xudt_out_cell.capacity())
+            + <Uint64 as Unpack<u64>>::unpack(&dump_unique_out_cell.capacity())
+            + Capacity::bytes(20).unwrap().as_u64() // unique args len 20
+            + 1000;
+        query
+    };
+
+    let mut ckb_cells = cell_collector.collect_live_cells(&ckb_query, true)?.0;
+    ckb_cells.retain(|cell| cell.output.type_().is_none());
+    assert!(!ckb_cells.is_empty());
+
+    let unique_out_cell = dump_unique_out_cell
+        .as_builder()
+        .type_(
+            Some(
+                unique_type_script_without_args
+                    .as_builder()
+                    .args(generate_unique_type_args(
+                        CellInput::new_builder()
+                            .previous_output(ckb_cells[0].clone().out_point)
+                            .build(),
+                        1,
+                    ))
+                    .build(),
+            )
+            .pack(),
+        )
+        .build();
+
+    for cell in ckb_cells {
+        builder.add_input(
+            TransactionInput {
+                live_cell: cell,
+                since: 0,
+            },
+            0,
+        )
+    }
+
     let issue_amount = ISSUE_AMOUNT * (10u128.pow(ISSUE_DECIMAL as u32));
-    builder.add_output_and_data(
-        CellOutput::new_builder()
-            .lock(issue_lock_script.clone())
-            .type_(Some(xudt_type).pack())
-            .capacity(
-                xudt_cell_capacity.pack(),
-            )
-            .build(),
-        issue_amount.to_le_bytes().pack(),
-    );
+    builder.add_output_and_data(xudt_out_cell, issue_amount.to_le_bytes().pack());
 
-    builder.add_output_and_data(
-        CellOutput::new_builder()
-            .lock(issue_lock_script.clone())
-            .type_(Some(unique_type_script).pack())
-            .capacity(
-                xudt_token_info_cell_capacity.pack(),
-            )
-            .build(),
-        encode_token_info().pack(),
-    );
-
-    builder.add_output_and_data(
-        CellOutput::new_builder()
-            .lock(issue_lock_script.clone())
-            .build(),
-        PackBytes::default(),
-    );
+    builder.add_output_and_data(unique_out_cell, encode_token_info().pack());
 
     builder.add_cell_deps(vec![
         CellDep::new_builder()
@@ -216,13 +211,6 @@ fn generate_unique_type_args(first_input: CellInput, first_output_index: u64) ->
     args[0..UNIQUE_ARGS_SIZE].pack()
 }
 
-fn calculate_xudt_token_info_cell_capacity(lock: Script) -> usize {
-    let lock_size = lock.args().len() + 33;
-    let cell_data_size = encode_token_info().len() / 2;
-    let unique_type_size = 32 + 1 + UNIQUE_ARGS_SIZE;
-    lock_size + unique_type_size + 8 + cell_data_size
-}
-
 fn encode_token_info() -> Vec<u8> {
     [
         &[ISSUE_DECIMAL],
@@ -232,11 +220,4 @@ fn encode_token_info() -> Vec<u8> {
         ISSUE_SYMBOL.as_bytes(),
     ]
     .concat()
-}
-
-fn calculate_udt_cell_capacity(lock: Script) -> usize {
-    let args_size = lock.args().len();
-    let type_args = 32;
-    let cell_size = 33 + args_size + 33 + type_args + 8 + 16;
-    cell_size + 1
 }
